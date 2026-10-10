@@ -1,61 +1,82 @@
 # 实时报名人数网页
 
-这是一个能运行的网页项目，使用 Python 标准库 + SQLite，不需要额外安装第三方 Python 包。
+报名页面公开后，所有访问者使用同一个 Cloudflare D1 数据库，看到共享的报名总人数。
 
-## 本地运行
+## 推荐部署：Cloudflare Pages + D1（不使用 Render）
 
-1. 安装 Python 3.9 或更新版本。
-2. 将 `server.py` 和 `index.html` 放在同一个文件夹。
-3. 在该文件夹打开终端，运行：
+仓库已准备好 Cloudflare Pages 所需文件：
+- `public/index.html`：网页界面
+- `functions/api/state.js`：读取报名人数
+- `functions/api/register.js`：记录报名
+- `schema.sql`：创建 D1 数据表
 
-   ```bash
-   python server.py
-   ```
+### 第一步：在 Cloudflare Pages 连接 GitHub
 
-4. 浏览器打开 `http://127.0.0.1:8000`。
+1. 打开 [Cloudflare Dashboard](https://dash.cloudflare.com/) 并登录。
+2. 进入 **Workers & Pages**，选择创建应用（Create application），再选择 Pages / Connect to Git。
+3. 连接 GitHub，选择仓库 `zzz-1103/zzz123`，分支选择 `main`。
+4. 构建设置：
+   - Framework preset：`None`
+   - Build command：留空
+   - Build output directory：`public`
+   - Root directory：保持仓库根目录（不要填 `public`）
+5. 点击保存并部署，等待生成 `pages.dev` 网站地址。
 
-默认端口是 8000。更改端口可通过环境变量 `PORT` 设置，例如：
+### 第二步：创建 D1 数据库
 
-- Windows CMD：`set PORT=8080` 然后运行 `python server.py`
-- macOS/Linux：`PORT=8080 python3 server.py`
+1. 在 Cloudflare 控制台的 **Workers & Pages → D1 SQL Database** 中创建数据库，名称可用 `signup-db`。
+2. 打开该数据库的 Console / SQL 控制台。
+3. 打开本仓库的 `schema.sql`，复制其中 SQL 代码并执行。这会创建 `registrations` 表。
 
-## 怎样让所有人都能看到同一个实时人数
+SQL 内容：
 
-必须将整个项目部署到公网服务器或支持 Python 的托管平台。不能只把 `index.html` 发给别人，因为那样每个人都会在自己的浏览器中打开独立页面，无法共享数据库。
+```sql
+CREATE TABLE IF NOT EXISTS registrations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  visitor_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
 
-部署时需要满足：
+CREATE INDEX IF NOT EXISTS idx_registrations_created_at
+ON registrations(created_at);
+```
 
-- 所有访问者访问同一个运行中的服务；
-- SQLite 数据文件 `registrations.sqlite3` 放在持久化磁盘上，不能在每次重启/重新部署时被清空；
-- 若托管平台会把请求分发到多个实例，不要让每个实例使用各自独立的 SQLite 文件，应换成共享 PostgreSQL 等数据库；
-- 正式公网部署应启用 HTTPS，并设置 `COOKIE_SECURE=1`。如果使用平台反向代理，应按平台要求配置启动命令和端口。
+### 第三步：把数据库绑定到网站
 
-## 计数规则与限制
+1. 打开刚创建的 Pages 项目。
+2. 进入 **Settings → Bindings**，选择 **Add → D1 database binding**。
+3. Variable name 必须填写为 `DB`。
+4. 在 D1 database 一栏选择 `signup-db`，保存设置。
+5. 重新部署项目，让函数读取新绑定。
 
-- 点击报名后写入服务器数据库；所有访客看到同一个总数。
-- 同一个浏览器在保留 Cookie 的情况下重复点击不会重复计数。
-- 这并不能证明是一位真实自然人：清除 Cookie、换浏览器或换设备都可能再次报名。若业务要求“一个人只能报名一次”，应增加登录、手机号验证码或其他身份核验，并遵守适用的隐私保护要求。
-- 页面约每 2 秒读取一次服务器状态，所以通常会在 2 秒左右同步显示更新；它不是严格的 WebSocket 推送。
+### 第四步：验证
 
+- 打开 Pages 提供的 `https://…pages.dev` 地址，应该看到报名网页。
+- 打开 `https://…pages.dev/api/state`，应返回 JSON，其中有 `count` 和 `registered` 字段。
+- 在网页点一次「立即报名」，人数应增加 1；用另一个浏览器打开页面，应能看到相同总人数。
 
-## Render 一键部署（公网演示版）
+## 免费额度与数据
 
-仓库根目录已提供 `render.yaml`，其中定义了 Python Web Service 和 PostgreSQL 数据库。
+Cloudflare D1 免费方案没有 Render 那种“创建 30 天后数据库到期”的期限，但有每日查询额度和存储限制。官方当前列出的 D1 Free 配额包括每天 500 万行读取、每天 10 万行写入、每个账户总计 5GB 存储，单个数据库最多 500MB；Workers / Pages Functions 也有每天 100,000 次请求的免费额度。超过每日 D1 读写额度时，查询会暂时失败直到 UTC 午夜重置，数据本身不会因为达到额度而被删除。使用前请在控制台查看最新额度并监测使用量。
 
-1. 登录 [Render Dashboard](https://dashboard.render.com/)。
-2. 点击 **New → Blueprint**，连接 GitHub 仓库 `zzz-1103/zzz123`，选择 `main` 分支。
-3. 检查将要创建的资源：`zzz123-signup` Web Service 和 `zzz123-signup-db` PostgreSQL 数据库。
-4. 点击 **Deploy Blueprint**，等待 Web Service 和数据库部署成功。
-5. 在 Render 的 Web Service 页面打开它提供的 `onrender.com` 网址；可再访问 `/health` 检查服务器状态。
+注意：如果大量用户一直开着页面，实时刷新会持续消耗请求额度。正式活动应监控用量；如访问量较高，可以降低轮询频率或考虑适合的付费方案。
 
-配置说明：
-- 启动命令：`python server.py`
-- 构建命令：`pip install -r requirements.txt`
-- 数据库连接由 Blueprint 安全地注入 `DATABASE_URL`，应用会自动使用 PostgreSQL。
-- `COOKIE_SECURE=1` 会让浏览器只通过 HTTPS 发送报名 Cookie。
+## 报名去重与隐私说明
 
-**免费方案限制：** Render 免费 Web Service 在闲置 15 分钟后会休眠，唤醒可能需要约一分钟；免费 PostgreSQL 数据库会在创建 30 天后过期，并且没有备份。因此这个 Blueprint 适合先验证部署流程或短期演示，不适合作为长期正式报名系统。活动报名开始前，请先考虑将 Web Service 和数据库升级为合适的付费方案，并建立数据库备份/导出流程。免费数据库到期可能影响访问和数据保留。
+系统以长期 Cookie 的哈希值识别同一浏览器，能防止同一浏览器重复点击，但不能确认真实自然人身份。清除浏览器数据、换设备或使用另一个浏览器仍可能再次报名。若要求严格一人一报，应增加账号或手机号验证，并提供适当的隐私说明。
 
-## 功能限制
+页面只保存随机浏览器标识的哈希和报名时间，不收集姓名或手机号。
 
-目前以长期 Cookie 标识浏览器，能防止同一浏览器重复点击，但不能证明一个自然人只报名一次。清理 Cookie 或换设备可能再次报名。正式活动如需一人一报，需增加身份核验及相应隐私告知。
+## 本地运行（原 Python 版本）
+
+仓库根目录的 `server.py` 使用 Python 和 SQLite，可在本地运行：
+
+```bash
+python server.py
+```
+
+浏览器打开 `http://127.0.0.1:8000`。Cloudflare 部署时则使用 `public/` 和 `functions/` 中的 Pages 版本，不要在 Render 上创建服务。
+
+## 许可
+
+MIT License。若公开分享、修改或再发布，请保留许可文件。
