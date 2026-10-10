@@ -117,8 +117,13 @@
     });
 
     refreshState();
-    // 每 5 秒同步一次，兼顾免费计划请求限额与人数更新速度。
-    setInterval(() => refreshState(true), 5000);
+    // 只在页面可见时轮询，减少后台标签页消耗的免费请求额度。
+    setInterval(() => {
+      if (document.visibilityState === 'visible') refreshState(true);
+    }, 10000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') refreshState(true);
+    });
   </script>
 </body>
 </html>
