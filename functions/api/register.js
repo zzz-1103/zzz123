@@ -37,7 +37,7 @@ export async function onRequestPost({ request, env }) {
     ).bind(visitorHash).run();
 
     const row = await env.DB.prepare(
-      "SELECT COUNT(*) AS count FROM registrations"
+      "SELECT total_count AS count FROM registration_stats WHERE id = 1"
     ).first();
     const registered = await env.DB.prepare(
       "SELECT 1 AS found FROM registrations WHERE visitor_hash = ? LIMIT 1"
