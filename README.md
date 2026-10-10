@@ -36,3 +36,26 @@
 - 同一个浏览器在保留 Cookie 的情况下重复点击不会重复计数。
 - 这并不能证明是一位真实自然人：清除 Cookie、换浏览器或换设备都可能再次报名。若业务要求“一个人只能报名一次”，应增加登录、手机号验证码或其他身份核验，并遵守适用的隐私保护要求。
 - 页面约每 2 秒读取一次服务器状态，所以通常会在 2 秒左右同步显示更新；它不是严格的 WebSocket 推送。
+
+
+## Render 一键部署（公网演示版）
+
+仓库根目录已提供 `render.yaml`，其中定义了 Python Web Service 和 PostgreSQL 数据库。
+
+1. 登录 [Render Dashboard](https://dashboard.render.com/)。
+2. 点击 **New → Blueprint**，连接 GitHub 仓库 `zzz-1103/zzz123`，选择 `main` 分支。
+3. 检查将要创建的资源：`zzz123-signup` Web Service 和 `zzz123-signup-db` PostgreSQL 数据库。
+4. 点击 **Deploy Blueprint**，等待 Web Service 和数据库部署成功。
+5. 在 Render 的 Web Service 页面打开它提供的 `onrender.com` 网址；可再访问 `/health` 检查服务器状态。
+
+配置说明：
+- 启动命令：`python server.py`
+- 构建命令：`pip install -r requirements.txt`
+- 数据库连接由 Blueprint 安全地注入 `DATABASE_URL`，应用会自动使用 PostgreSQL。
+- `COOKIE_SECURE=1` 会让浏览器只通过 HTTPS 发送报名 Cookie。
+
+**免费方案限制：** Render 免费 Web Service 在闲置 15 分钟后会休眠，唤醒可能需要约一分钟；免费 PostgreSQL 数据库会在创建 30 天后过期，并且没有备份。因此这个 Blueprint 适合先验证部署流程或短期演示，不适合作为长期正式报名系统。活动报名开始前，请先考虑将 Web Service 和数据库升级为合适的付费方案，并建立数据库备份/导出流程。免费数据库到期可能影响访问和数据保留。
+
+## 功能限制
+
+目前以长期 Cookie 标识浏览器，能防止同一浏览器重复点击，但不能证明一个自然人只报名一次。清理 Cookie 或换设备可能再次报名。正式活动如需一人一报，需增加身份核验及相应隐私告知。
