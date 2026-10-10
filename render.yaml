@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: zzz123-signup
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: zzz123-signup-db
+          property: connectionString
+      - key: COOKIE_SECURE
+        value: "1"
+
+databases:
+  - name: zzz123-signup-db
+    plan: free
+    region: singapore
+    databaseName: signup_db
+    user: signup_user
