@@ -3,16 +3,14 @@ const COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 10;
 
 function tokenFromRequest(request) {
   const cookie = request.headers.get("Cookie") || "";
-  const match = cookie.match(new RegExp("(?:^|;\\s*)" + COOKIE_NAME + "=([A-Za-z0-9_-]{43})(?:;|$)"));
+  const match = cookie.match(new RegExp("(?:^|;\\s*)" + COOKIE_NAME + "=([a-f0-9]{64})(?:;|$)"));
   return match ? match[1] : null;
 }
 
 function newToken() {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, "");
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function hashToken(token) {
@@ -34,7 +32,6 @@ export async function onRequestPost({ request, env }) {
     }
     const visitorHash = await hashToken(token);
 
-    // The unique constraint and INSERT OR IGNORE prevent duplicate clicks for this cookie.
     await env.DB.prepare(
       "INSERT OR IGNORE INTO registrations (visitor_hash) VALUES (?)"
     ).bind(visitorHash).run();
