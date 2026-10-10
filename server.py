@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""A tiny server-backed live registration counter. Python standard library only."""
+"""A tiny server-backed live registration counter. SQLite locally, PostgreSQL on Render."""
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,14 +14,30 @@ from contextlib import contextmanager
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("SIGNUP_DB_PATH", str(BASE_DIR / "registrations.sqlite3")))
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8000"))
 COOKIE_NAME = "signup_visitor"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 10
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0").lower() in {"1", "true", "yes"}
 
+if DATABASE_URL:
+    import psycopg
+
 
 def connect_db():
+    if DATABASE_URL:
+        connection = psycopg.connect(DATABASE_URL, connect_timeout=10)
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS registrations (
+                   id BIGSERIAL PRIMARY KEY,
+                   visitor_hash TEXT NOT NULL UNIQUE,
+                   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+               )"""
+        )
+        connection.commit()
+        return connection
+
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH, timeout=15)
     connection.execute("PRAGMA journal_mode=WAL")
@@ -37,9 +53,20 @@ def connect_db():
     return connection
 
 
+def execute(db, sql, params=()):
+    """Run portable SQL using the placeholder and conflict syntax for the active DB."""
+    if DATABASE_URL:
+        sql = sql.replace(
+            "INSERT OR IGNORE INTO registrations (visitor_hash) VALUES (?)",
+            "INSERT INTO registrations (visitor_hash) VALUES (?) ON CONFLICT (visitor_hash) DO NOTHING",
+        )
+        sql = sql.replace("?", "%s")
+    return db.execute(sql, params)
+
+
 @contextmanager
 def database():
-    """Commit on success and always close the SQLite connection."""
+    """Commit on success and always close the database connection."""
     connection = connect_db()
     try:
         yield connection
@@ -56,7 +83,7 @@ def hash_token(token: str) -> str:
 
 
 class SignupHandler(BaseHTTPRequestHandler):
-    server_version = "LiveSignup/1.0"
+    server_version = "LiveSignup/1.1"
 
     def _send_json(self, status, payload, cookie_token=None):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -96,15 +123,19 @@ class SignupHandler(BaseHTTPRequestHandler):
             token = morsel.value if morsel else ""
         except Exception:
             token = ""
-        # Tokens are url-safe, server-generated random values; reject malformed ones.
-        if len(token) != 43 or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for ch in token):
+        # Tokens are server-generated random values; reject malformed values.
+        if len(token) != 43 or any(
+            ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+            for ch in token
+        ):
             return secrets.token_urlsafe(32), True
         return token, False
 
     def _snapshot(self, token):
         with database() as db:
-            count = db.execute("SELECT COUNT(*) FROM registrations").fetchone()[0]
-            exists = db.execute(
+            count = execute(db, "SELECT COUNT(*) FROM registrations").fetchone()[0]
+            exists = execute(
+                db,
                 "SELECT 1 FROM registrations WHERE visitor_hash = ? LIMIT 1",
                 (hash_token(token),),
             ).fetchone() is not None
@@ -121,10 +152,20 @@ class SignupHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/state":
             token, is_new = self._get_or_create_token()
-            self._send_json(200, self._snapshot(token), cookie_token=token if is_new else None)
+            try:
+                payload = self._snapshot(token)
+            except Exception:
+                self._send_json(503, {"error": "数据库暂时不可用，请稍后重试。"})
+                return
+            self._send_json(200, payload, cookie_token=token if is_new else None)
             return
         if self.path == "/health":
-            self._send_json(200, {"ok": True})
+            try:
+                with database() as db:
+                    execute(db, "SELECT 1")
+                self._send_json(200, {"ok": True})
+            except Exception:
+                self._send_json(503, {"ok": False, "error": "database unavailable"})
             return
         self.send_error(404, "Not found")
 
@@ -141,20 +182,23 @@ class SignupHandler(BaseHTTPRequestHandler):
         token_hash = hash_token(token)
         try:
             with database() as db:
-                # INSERT OR IGNORE makes repeated/concurrent clicks idempotent per browser token.
-                db.execute("INSERT OR IGNORE INTO registrations (visitor_hash) VALUES (?)", (token_hash,))
-                count = db.execute("SELECT COUNT(*) FROM registrations").fetchone()[0]
-                exists = db.execute(
+                # Conflict handling makes repeated/concurrent clicks idempotent per browser token.
+                execute(db, "INSERT OR IGNORE INTO registrations (visitor_hash) VALUES (?)", (token_hash,))
+                count = execute(db, "SELECT COUNT(*) FROM registrations").fetchone()[0]
+                exists = execute(
+                    db,
                     "SELECT 1 FROM registrations WHERE visitor_hash = ? LIMIT 1",
                     (token_hash,),
                 ).fetchone() is not None
-            self._send_json(200, {"count": count, "registered": exists, "updatedAt": int(time.time())},
-                            cookie_token=token if is_new else None)
-        except sqlite3.Error:
+            self._send_json(
+                200,
+                {"count": count, "registered": exists, "updatedAt": int(time.time())},
+                cookie_token=token if is_new else None,
+            )
+        except Exception:
             self._send_json(500, {"error": "暂时无法保存报名，请稍后重试。"})
 
     def log_message(self, format, *args):
-        # Keep simple request logging while avoiding noisy output from polling.
         if self.path not in ("/api/state",):
             super().log_message(format, *args)
 
@@ -165,10 +209,10 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
 
 
 if __name__ == "__main__":
-    # Initialize the database before accepting requests.
-    with database():
-        pass
-    print(f"报名网页运行中：http://127.0.0.1:{PORT}")
-    print(f"数据库文件：{DB_PATH}")
+    with database() as db:
+        execute(db, "SELECT 1")
+    backend = "PostgreSQL" if DATABASE_URL else f"SQLite（{DB_PATH}）"
+    print(f"报名网页服务启动，监听端口：{PORT}")
+    print(f"数据库类型：{backend}")
     print("停止服务请按 Ctrl+C")
     ReusableThreadingHTTPServer((HOST, PORT), SignupHandler).serve_forever()
