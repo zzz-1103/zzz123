@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#101827" />
+  <title>活动报名</title>
+  <style>
+    :root { color-scheme: light; --ink:#172033; --muted:#6d778a; --accent:#5b68f5; --line:#e6eaf2; }
+    * { box-sizing: border-box; }
+    body {
+      margin:0; min-height:100vh; display:grid; place-items:center; padding:24px;
+      font-family: system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+      color:var(--ink);
+      background: radial-gradient(circle at 15% 10%, #e7eaff 0, transparent 34%),
+                  radial-gradient(circle at 90% 85%, #d9f7f0 0, transparent 32%), #f5f7fb;
+    }
+    .card { width:min(100%, 520px); background:rgba(255,255,255,.94); border:1px solid rgba(255,255,255,.9);
+      border-radius:28px; padding:clamp(26px,6vw,48px); text-align:center; box-shadow:0 24px 80px rgba(39,51,93,.12); }
+    .eyebrow { display:inline-flex; align-items:center; gap:8px; padding:7px 12px; color:#4b57db; background:#eef0ff;
+      border-radius:999px; font-size:13px; font-weight:700; letter-spacing:.04em; }
+    .dot { width:7px; height:7px; border-radius:50%; background:#28b987; box-shadow:0 0 0 4px rgba(40,185,135,.12); }
+    h1 { margin:22px 0 10px; font-size:clamp(30px,7vw,42px); line-height:1.2; letter-spacing:-.04em; }
+    .intro { margin:0 auto; max-width:350px; color:var(--muted); line-height:1.8; font-size:15px; }
+    .counter { margin:30px 0 22px; padding:24px 12px; background:#f7f8ff; border:1px solid #eaecff; border-radius:20px; }
+    .counter-label { color:var(--muted); font-size:14px; }
+    .number { display:block; margin:5px 0 2px; color:#4f5cf0; font-size:clamp(46px,12vw,64px); line-height:1.15; font-weight:800; font-variant-numeric:tabular-nums; letter-spacing:-.04em; }
+    .live { color:#788196; font-size:12px; }
+    button { width:100%; min-height:56px; border:0; border-radius:15px; padding:15px 20px; color:white; background:linear-gradient(135deg,#6874ff,#5057e9);
+      font:inherit; font-size:16px; font-weight:750; cursor:pointer; box-shadow:0 10px 24px rgba(86,97,239,.24); transition:transform .15s,opacity .15s,box-shadow .15s; }
+    button:hover:not(:disabled) { transform:translateY(-1px); box-shadow:0 14px 28px rgba(86,97,239,.3); }
+    button:active:not(:disabled) { transform:translateY(0); }
+    button:disabled { cursor:default; opacity:1; box-shadow:none; }
+    button.done { background:#eaf8f1; color:#16825b; }
+    .status { min-height:24px; margin:12px 0 0; color:var(--muted); font-size:13px; line-height:1.6; }
+    .footnote { margin:25px 0 0; padding-top:18px; border-top:1px solid var(--line); color:#8a93a4; font-size:12px; line-height:1.7; }
+    @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="eyebrow"><span class="dot"></span> 实时报名系统</div>
+    <h1>期待你的加入</h1>
+    <p class="intro">点击下方按钮完成报名。报名数据将保存到服务器，所有访问者看到的是同一份实时总人数。</p>
+
+    <section class="counter" aria-live="polite" aria-atomic="true">
+      <div class="counter-label">当前已报名人数</div>
+      <strong class="number" id="count">—</strong>
+      <div class="live" id="liveText">正在连接服务器…</div>
+    </section>
+
+    <button id="signupButton" type="button" disabled>正在加载…</button>
+    <p class="status" id="status" role="status"></p>
+    <p class="footnote">人数由服务器数据库统计，页面会自动刷新数据。当前版本按浏览器识别重复报名；清除浏览器数据或更换设备可能被视为新的报名。若要严格保证一人一报，请接入账号或手机号验证。</p>
+  </main>
+
+  <script>
+    const countEl = document.getElementById('count');
+    const button = document.getElementById('signupButton');
+    const statusEl = document.getElementById('status');
+    const liveText = document.getElementById('liveText');
+    let registered = false;
+    let requestInProgress = false;
+
+    function render(data) {
+      if (typeof data.count === 'number') countEl.textContent = data.count.toLocaleString('zh-CN');
+      registered = Boolean(data.registered);
+      if (registered) {
+        button.textContent = '✓ 已报名';
+        button.classList.add('done');
+        button.disabled = true;
+        statusEl.textContent = '你的报名已记录成功。';
+      } else {
+        button.textContent = '立即报名';
+        button.classList.remove('done');
+        button.disabled = requestInProgress;
+      }
+      liveText.textContent = '已连接 · 自动同步中';
+    }
+
+    async function getState() {
+      const response = await fetch('/api/state', { cache: 'no-store', credentials: 'same-origin' });
+      if (!response.ok) throw new Error('state request failed');
+      return response.json();
+    }
+
+    async function refreshState(silent = false) {
+      try {
+        render(await getState());
+      } catch (error) {
+        liveText.textContent = '连接中断，正在重试…';
+        if (!silent) statusEl.textContent = '暂时无法连接服务器，请检查网络后重试。';
+        button.disabled = true;
+      }
+    }
+
+    button.addEventListener('click', async () => {
+      if (registered || requestInProgress) return;
+      requestInProgress = true;
+      button.disabled = true;
+      button.textContent = '正在提交…';
+      statusEl.textContent = '';
+      try {
+        const response = await fetch('/api/register', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'X-Requested-With': 'fetch' }
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'register failed');
+        render(data);
+        statusEl.textContent = '报名成功，已计入总人数！';
+      } catch (error) {
+        statusEl.textContent = '报名提交失败，请检查网络后重试。';
+        await refreshState(true);
+      } finally {
+        requestInProgress = false;
+        if (!registered) button.disabled = false;
+      }
+    });
+
+    refreshState();
+    // 每 2 秒拉取一次服务器最新人数；无需手动刷新页面。
+    setInterval(() => refreshState(true), 2000);
+  </script>
+</body>
+</html>
