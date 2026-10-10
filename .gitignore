@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Live signup app data (never commit visitor registrations)
+registrations.sqlite3
+registrations.sqlite3-shm
+registrations.sqlite3-wal
