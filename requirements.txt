@@ -1,1 +1,2 @@
-# No third-party packages required. Uses Python standard library only.
+# psycopg provides PostgreSQL support on hosted deployments; local SQLite needs no extra packages.
+psycopg[binary]>=3.2,<4
