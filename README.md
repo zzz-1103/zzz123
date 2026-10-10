@@ -37,8 +37,21 @@ CREATE TABLE IF NOT EXISTS registrations (
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_registrations_created_at
-ON registrations(created_at);
+CREATE TABLE IF NOT EXISTS registration_stats (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  total_count INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT OR IGNORE INTO registration_stats (id, total_count)
+SELECT 1, COUNT(*) FROM registrations;
+
+CREATE TRIGGER IF NOT EXISTS registrations_count_after_insert
+AFTER INSERT ON registrations
+BEGIN
+  UPDATE registration_stats
+  SET total_count = total_count + 1
+  WHERE id = 1;
+END;
 ```
 
 ### 第三步：把数据库绑定到网站
@@ -57,7 +70,7 @@ ON registrations(created_at);
 
 ## 免费额度与数据
 
-Cloudflare D1 免费方案没有 Render 那种“创建 30 天后数据库到期”的期限，但有每日查询额度和存储限制。官方当前列出的 D1 Free 配额包括每天 500 万行读取、每天 10 万行写入、每个账户总计 5GB 存储，单个数据库最多 500MB；Workers / Pages Functions 也有每天 100,000 次请求的免费额度。超过每日 D1 读写额度时，查询会暂时失败直到 UTC 午夜重置，数据本身不会因为达到额度而被删除。使用前请在控制台查看最新额度并监测使用量。
+这条路线改用 Cloudflare D1 免费方案，不再使用 Render 的数据库，因此不受 Render“创建 30 天后到期”的规则约束。但 Cloudflare 仍有自己的每日额度和存储限制；不同账户可能出现额外验证要求，无法保证每个新账户都完全不需要验证。官方当前列出的 D1 Free 配额包括每天 500 万行读取、每天 10 万行写入、每个账户总计 5GB 存储，单个数据库最多 500MB；Workers / Pages Functions 也有每天 100,000 次请求的免费额度。超过每日 D1 读写额度时，查询会暂时失败直到 UTC 午夜重置，数据本身不会因为达到额度而被删除。使用前请在控制台查看最新额度并监测使用量。
 
 注意：如果大量用户一直开着页面，实时刷新会持续消耗请求额度。正式活动应监控用量；如访问量较高，可以降低轮询频率或考虑适合的付费方案。
 
