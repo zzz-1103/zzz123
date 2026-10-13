@@ -22,8 +22,11 @@ header h1{font-size:18px;color:#c06090;}
 .user{padding:10px 12px;border-radius:8px;cursor:pointer;border:1px solid transparent;}
 .user:hover{background:#faf0f5;}
 .user.active{background:#f7e6ee;border-color:#e4b7cb;}
-.user .nick{font-weight:600;font-size:14px;}
+.user .row{display:flex;justify-content:space-between;align-items:center;gap:8px;}
+.user .nick{font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .user .meta{font-size:12px;color:#999;margin-top:3px;}
+.user .del{background:#eee;color:#a33;font-size:11px;padding:3px 9px;border-radius:5px;flex:none;}
+.user .del:hover{background:#e74c3c;color:#fff;}
 .msg{margin:8px 0;padding:8px 12px;border-radius:10px;line-height:1.6;font-size:14px;max-width:92%;}
 .msg .who{font-size:11px;color:#999;margin-bottom:2px;}
 .msg.user{background:#f0f0f0;margin-left:auto;}
@@ -106,11 +109,33 @@ async function loadUsers() {
     const div = document.createElement('div');
     div.className = 'user';
     div.dataset.id = u.id;
-    div.innerHTML = '<div class="nick">' + esc(u.nickname) + '</div>' +
+    div.innerHTML = '<div class="row"><div class="nick">' + esc(u.nickname) + '</div>' +
+      '<button class="del" title="删除该用户及其全部聊天记录">删除</button></div>' +
       '<div class="meta">' + u.msg_count + ' 条 · 最后 ' + fmtTime(u.last_active) + '</div>';
+    div.querySelector('.del').onclick = e => { e.stopPropagation(); deleteUser(u); };
     div.onclick = () => loadUser(u.id, u.nickname);
     el.appendChild(div);
   });
+}
+
+async function deleteUser(u) {
+  if (!confirm('确定要删除「' + u.nickname + '」及其全部 ' + u.msg_count + ' 条聊天记录吗？')) return;
+  if (!confirm('再次确认：删除后无法恢复，真的要删吗？')) return;
+  try {
+    const d = await api('/api/admin/delete-user', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: u.id })
+    });
+    if (!d || !d.ok) { alert('删除失败：' + ((d && d.error) || '未知错误')); return; }
+    alert('已删除「' + u.nickname + '」及其 ' + d.deleted_messages + ' 条聊天记录');
+    if (currentUserId === u.id) {
+      currentUserId = '';
+      document.getElementById('chat').innerHTML = '';
+    }
+    loadUsers();
+  } catch (e) {
+    alert('删除失败：' + ((e && e.message) || e));
+  }
 }
 
 async function loadUser(id, nickname) {

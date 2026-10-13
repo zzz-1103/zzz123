@@ -11,7 +11,8 @@ export const config = {
     '/api/reply',
     '/api/admin/login',
     '/api/admin/users',
-    '/api/admin/messages'
+    '/api/admin/messages',
+    '/api/admin/delete-user'
   ]
 };
 
@@ -235,6 +236,24 @@ export default async (request, context) => {
           });
         }
         return json({ messages: rows }, 200, origin);
+      }
+
+      // ---- 删除某个用户及其全部聊天记录（messages 表是 ON DELETE CASCADE）----
+      if (path === '/admin/delete-user' && method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const userId = String(body.user_id || '');
+        if (!userId) return json({ error: '缺少 user_id' }, 400, origin);
+
+        // 先数一下有多少条，删完就查不到了
+        const cnt = await sql`SELECT COUNT(*)::int AS n FROM messages WHERE user_id = ${userId}`;
+        const del = await sql`DELETE FROM users WHERE id = ${userId} RETURNING id`;
+        if (!del.length) return json({ error: '没找到这个用户' }, 404, origin);
+
+        return json({
+          ok: true,
+          deleted_users: del.length,
+          deleted_messages: (cnt[0] && cnt[0].n) || 0
+        }, 200, origin);
       }
     }
 
