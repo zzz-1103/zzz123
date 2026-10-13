@@ -1,0 +1,15 @@
+# 林黛玉后端（代码在 daiyu-backend/ 子文件夹）
+[build]
+  base = "daiyu-backend"
+  functions = "netlify/functions"
+  publish = "public"
+
+[[redirects]]
+  from = "/"
+  to = "/admin.html"
+  status = 200
+
+[[redirects]]
+  from = "/admin"
+  to = "/admin.html"
+  status = 200
