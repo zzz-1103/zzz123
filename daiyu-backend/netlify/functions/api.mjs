@@ -96,6 +96,20 @@ function checkAdminToken(token) {
   return hmac(payload) === sig;
 }
 
+// 递归挖出最底层的错误原因（Neon 驱动会把 DNS 之类的错误层层包裹）
+function rootCause(err) {
+  let cur = err;
+  const seen = new Set();
+  let best = '';
+  for (let i = 0; i < 6 && cur && typeof cur === 'object' && !seen.has(cur); i++) {
+    seen.add(cur);
+    if (cur.code) best = String(cur.code);
+    else if (cur.message && !/fetch failed/i.test(cur.message)) best = String(cur.message);
+    cur = cur.cause || cur.sourceError;
+  }
+  return best;
+}
+
 export default async (request, context) => {
   const origin = request.headers.get('origin') || '';
   const method = request.method.toUpperCase();
@@ -226,6 +240,8 @@ export default async (request, context) => {
 
     return json({ error: 'not found' }, 404, origin);
   } catch (e) {
-    return json({ error: String((e && e.message) || e) }, 500, origin);
+    const detail = rootCause(e);
+    const msg = String((e && e.message) || e) + (detail ? ' | ' + detail : '');
+    return json({ error: msg }, 500, origin);
   }
 };
