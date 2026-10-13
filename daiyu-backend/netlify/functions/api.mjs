@@ -1,10 +1,18 @@
 // 林黛玉后端 · Netlify Function（主 API）
-// 路由：/api/*
+// 路由：显式列出，避免通配符写法不确定
 import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
 
 export const config = {
-  path: '/api/*'
+  path: [
+    '/api/health',
+    '/api/login',
+    '/api/chat',
+    '/api/reply',
+    '/api/admin/login',
+    '/api/admin/users',
+    '/api/admin/messages'
+  ]
 };
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
@@ -12,6 +20,16 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || ADMIN_PASSWORD || 'daiyu-change
 const APP_API_KEY = process.env.APP_API_KEY || '';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || 'https://lindaiyu.netlify.app')
   .split(',').map(s => s.trim()).filter(Boolean);
+
+// 允许的跨域来源：配置里列出的 + 任意 netlify.app 站点（前端站改名/预览部署也不怕）
+function originAllowed(origin) {
+  if (!origin) return false;
+  if (ALLOWED_ORIGINS.includes(origin)) return true;
+  if (/^https:\/\/[a-z0-9-]+\.netlify\.app$/.test(origin)) return true;
+  if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return true;
+  if (/^http:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) return true;
+  return false;
+}
 
 let _sql = null;
 function db() {
@@ -46,7 +64,7 @@ function ensureSchema() {
 
 function makeHeaders(origin, extra) {
   const h = new Headers({ 'Content-Type': 'application/json; charset=utf-8' });
-  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+  if (originAllowed(origin)) {
     h.set('Access-Control-Allow-Origin', origin);
     h.set('Vary', 'Origin');
     h.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-App-Key');
@@ -78,7 +96,7 @@ function checkAdminToken(token) {
   return hmac(payload) === sig;
 }
 
-export default async (request) => {
+export default async (request, context) => {
   const origin = request.headers.get('origin') || '';
   const method = request.method.toUpperCase();
 
@@ -120,14 +138,20 @@ export default async (request) => {
       const rows = await sql`INSERT INTO messages(user_id, role, content, model)
         VALUES(${userId}, 'user', ${message}, ${model}) RETURNING id`;
 
-      // 交给后台函数去问 DeepSeek（后台函数最长可跑 15 分钟，客户端已收到 202）
+      // 交给后台函数去问 DeepSeek（后台函数可跑 15 分钟）
       const bgHeaders = { 'Content-Type': 'application/json' };
       if (APP_API_KEY) bgHeaders['X-App-Key'] = APP_API_KEY;
-      await fetch(`${url.origin}/bg/chat`, {
+      const bgPromise = fetch(`${url.origin}/bg/chat`, {
         method: 'POST',
         headers: bgHeaders,
         body: JSON.stringify({ user_id: userId, model })
       }).catch(() => {});
+
+      if (context && typeof context.waitUntil === 'function') {
+        context.waitUntil(bgPromise);   // 不阻塞响应
+      } else {
+        await bgPromise;
+      }
 
       return json({ ok: true, msg_id: rows[0].id }, 200, origin);
     }
