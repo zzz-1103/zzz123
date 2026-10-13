@@ -27,7 +27,7 @@
 
 后端代码已推送到 `https://github.com/zzz-1103/zzz123` 仓库的 **`daiyu-backend/`** 子文件夹里。
 
-以后改了后端代码要同步上去：在 `D:\DaiyuApp\backend` 里**右键 `push.ps1` → 使用 PowerShell 运行**即可（自动拉取 → 覆盖 → 推送）。
+以后改了后端代码要同步上去：在 `D:\DaiyuApp\backend` 里**双击 `一键同步.bat`** 即可（自动拉取 → 覆盖 → 推送）。
 
 > 注意：真实 key 只放在环境变量里，`.env` 已被 `.gitignore` 忽略，不会上传。
 
