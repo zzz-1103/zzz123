@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>黛玉聊天记录 · 管理后台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:-apple-system,"Microsoft YaHei",sans-serif;background:#f5efe8;color:#333;}
+.hidden{display:none!important;}
+.card{max-width:360px;margin:80px auto;background:#fff;border-radius:12px;padding:28px;box-shadow:0 4px 16px rgba(0,0,0,.08);text-align:center;}
+.card h1{font-size:20px;margin-bottom:6px;color:#c06090;}
+.card p{color:#999;font-size:13px;margin-bottom:16px;}
+.card input{width:100%;padding:10px 14px;border:1px solid #ddd;border-radius:8px;font-size:15px;margin-bottom:12px;outline:none;}
+button{cursor:pointer;border:none;border-radius:8px;padding:10px 16px;font-size:14px;background:#c06090;color:#fff;}
+header{display:flex;justify-content:space-between;align-items:center;padding:14px 20px;background:#fff;border-bottom:1px solid #eee;}
+header h1{font-size:18px;color:#c06090;}
+#err{color:#c0392b;font-size:13px;margin-top:8px;min-height:18px;}
+.toolbar{text-align:center;padding:14px 14px 4px;}
+.cols{display:grid;grid-template-columns:280px 1fr;gap:14px;padding:10px 14px 20px;max-width:1000px;margin:0 auto;}
+.col{background:#fff;border-radius:10px;padding:14px;overflow-y:auto;max-height:72vh;}
+.user{padding:10px 12px;border-radius:8px;cursor:pointer;border:1px solid transparent;}
+.user:hover{background:#faf0f5;}
+.user.active{background:#f7e6ee;border-color:#e4b7cb;}
+.user .nick{font-weight:600;font-size:14px;}
+.user .meta{font-size:12px;color:#999;margin-top:3px;}
+.msg{margin:8px 0;padding:8px 12px;border-radius:10px;line-height:1.6;font-size:14px;max-width:92%;}
+.msg .who{font-size:11px;color:#999;margin-bottom:2px;}
+.msg.user{background:#f0f0f0;margin-left:auto;}
+.msg.assistant{background:#fdeef4;margin-right:auto;}
+@media(max-width:720px){.cols{grid-template-columns:1fr;}.col{max-height:40vh;}}
+</style>
+</head>
+<body>
+<div id="login" class="card">
+  <h1>黛玉聊天记录</h1>
+  <p>输入管理密码查看</p>
+  <input id="pw" type="password" placeholder="管理密码" onkeydown="if(event.key==='Enter')login()">
+  <button onclick="login()">登录</button>
+  <div id="err"></div>
+</div>
+
+<div id="main" class="hidden">
+  <header>
+    <h1>黛玉聊天记录</h1>
+    <button onclick="logout()" style="background:#888">退出</button>
+  </header>
+  <div class="toolbar">
+    <button onclick="loadAll()">查看全部记录</button>
+    <button onclick="exportCsv()" style="background:#5a8de0">导出 CSV</button>
+  </div>
+  <div class="cols">
+    <div id="users" class="col"></div>
+    <div id="chat" class="col"></div>
+  </div>
+</div>
+
+<script>
+let token = localStorage.getItem('daiyu_admin_token') || '';
+let currentUserId = '';
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + token,
+      ...(opts.headers || {})
+    }
+  });
+  if (res.status === 401) { showLogin(); throw new Error('未登录'); }
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return res.json();
+  return res.text();
+}
+
+function showLogin() { document.getElementById('login').classList.remove('hidden'); document.getElementById('main').classList.add('hidden'); }
+function showMain() { document.getElementById('login').classList.add('hidden'); document.getElementById('main').classList.remove('hidden'); }
+
+async function login() {
+  const pw = document.getElementById('pw').value;
+  document.getElementById('err').textContent = '';
+  try {
+    const d = await fetch('/api/admin/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw })
+    }).then(r => r.json());
+    if (!d.token) { document.getElementById('err').textContent = d.error || '密码不对'; return; }
+    token = d.token;
+    localStorage.setItem('daiyu_admin_token', token);
+    showMain();
+    loadUsers();
+  } catch (e) { document.getElementById('err').textContent = '登录失败'; }
+}
+
+function logout() { token = ''; localStorage.removeItem('daiyu_admin_token'); currentUserId = ''; showLogin(); }
+
+function esc(s) { return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function fmtTime(t) { const d = new Date(t); return d.toLocaleString('zh-CN', { hour12: false }); }
+
+async function loadUsers() {
+  const d = await api('/api/admin/users');
+  const el = document.getElementById('users');
+  el.innerHTML = '<div style="font-weight:600;margin-bottom:8px">聊过的人（' + (d.users || []).length + '）</div>';
+  (d.users || []).forEach(u => {
+    const div = document.createElement('div');
+    div.className = 'user';
+    div.dataset.id = u.id;
+    div.innerHTML = '<div class="nick">' + esc(u.nickname) + '</div>' +
+      '<div class="meta">' + u.msg_count + ' 条 · 最后 ' + fmtTime(u.last_active) + '</div>';
+    div.onclick = () => loadUser(u.id, u.nickname);
+    el.appendChild(div);
+  });
+}
+
+async function loadUser(id, nickname) {
+  currentUserId = id;
+  document.querySelectorAll('.user').forEach(e => e.classList.toggle('active', e.dataset.id === id));
+  const d = await api('/api/admin/messages?user_id=' + encodeURIComponent(id));
+  renderMessages(d.messages || [], nickname);
+}
+
+async function loadAll() {
+  currentUserId = '';
+  document.querySelectorAll('.user').forEach(e => e.classList.remove('active'));
+  const d = await api('/api/admin/messages');
+  renderMessages((d.messages || []).slice().reverse(), '全部记录（最近 500 条）');
+}
+
+function renderMessages(msgs, title) {
+  const el = document.getElementById('chat');
+  el.innerHTML = '<div style="font-weight:600;margin-bottom:8px">' + esc(title) + '</div>';
+  msgs.forEach(m => {
+    const div = document.createElement('div');
+    div.className = 'msg ' + (m.role === 'assistant' ? 'assistant' : 'user');
+    const who = m.role === 'assistant' ? '黛玉' : (m.nickname || '用户');
+    div.innerHTML = '<div class="who">' + esc(who) + ' · ' + fmtTime(m.created_at) + '</div>' + esc(m.content);
+    el.appendChild(div);
+  });
+  el.scrollTop = el.scrollHeight;
+}
+
+async function exportCsv() {
+  const url = currentUserId
+    ? '/api/admin/messages?user_id=' + encodeURIComponent(currentUserId) + '&format=csv'
+    : '/api/admin/messages?format=csv';
+  const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+  if (!res.ok) { alert('导出失败'); return; }
+  const blob = await res.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'daiyu_chat.csv';
+  a.click();
+}
+
+if (token) { showMain(); loadUsers(); } else { showLogin(); }
+</script>
+</body>
+</html>
