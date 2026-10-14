@@ -150,6 +150,11 @@ export default async (request, context) => {
       const model = body.model === 'deepseek-reasoner' ? 'deepseek-reasoner' : 'deepseek-chat';
       if (!userId || !message) return json({ error: '缺少参数' }, 400, origin);
 
+      // 浏览器里存的 user_id 可能已经不存在了（比如这个用户被主人删了）
+      // 先确认存在，不存在就回明确信号，让前端自动重新登录，而不是抛外键错误
+      const who = await sql`SELECT id FROM users WHERE id = ${userId}`;
+      if (!who.length) return json({ error: 'user_not_found' }, 409, origin);
+
       const rows = await sql`INSERT INTO messages(user_id, role, content, model)
         VALUES(${userId}, 'user', ${message}, ${model}) RETURNING id`;
 
