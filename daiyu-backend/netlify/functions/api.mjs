@@ -2,6 +2,9 @@
 // 路由：显式列出，避免通配符写法不确定
 import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
+import {
+  AFFINITY_INIT, clamp, fetchWeather, buildGreetPrompt, greetProbability, chatOnce
+} from '../../lib/daiyu.mjs';
 
 export const config = {
   path: [
@@ -9,6 +12,7 @@ export const config = {
     '/api/login',
     '/api/chat',
     '/api/reply',
+    '/api/greet',
     '/api/admin/login',
     '/api/admin/users',
     '/api/admin/messages',
@@ -58,6 +62,9 @@ function ensureSchema() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       )`;
       await sql`CREATE INDEX IF NOT EXISTS idx_messages_user_created ON messages(user_id, created_at)`;
+      // 好感度字段（对已有表也安全，重复执行无副作用）
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS affinity INT NOT NULL DEFAULT 40`;
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS praise_streak INT NOT NULL DEFAULT 0`;
     })().catch(e => { _schema = null; throw e; });
   }
   return _schema;
@@ -152,7 +159,7 @@ export default async (request, context) => {
 
       // 浏览器里存的 user_id 可能已经不存在了（比如这个用户被主人删了）
       // 先确认存在，不存在就回明确信号，让前端自动重新登录，而不是抛外键错误
-      const who = await sql`SELECT id FROM users WHERE id = ${userId}`;
+      const who = await sql`SELECT id, affinity FROM users WHERE id = ${userId}`;
       if (!who.length) return json({ error: 'user_not_found' }, 409, origin);
 
       const rows = await sql`INSERT INTO messages(user_id, role, content, model)
@@ -161,10 +168,15 @@ export default async (request, context) => {
       // 交给后台函数去问 DeepSeek（后台函数可跑 15 分钟）
       const bgHeaders = { 'Content-Type': 'application/json' };
       if (APP_API_KEY) bgHeaders['X-App-Key'] = APP_API_KEY;
+      // 把访客的大致位置一并交给后台函数，用来评价天气（Netlify 从 IP 推断，不需要用户授权）
+      const geo = (context && context.geo)
+        ? { lat: context.geo.latitude, lon: context.geo.longitude, city: context.geo.city }
+        : null;
+
       const bgPromise = fetch(`${url.origin}/bg/chat`, {
         method: 'POST',
         headers: bgHeaders,
-        body: JSON.stringify({ user_id: userId, model })
+        body: JSON.stringify({ user_id: userId, model, geo })
       }).catch(() => {});
 
       if (context && typeof context.waitUntil === 'function') {
@@ -173,7 +185,8 @@ export default async (request, context) => {
         await bgPromise;
       }
 
-      return json({ ok: true, msg_id: rows[0].id }, 200, origin);
+      const affNow = clamp(who[0].affinity === null || who[0].affinity === undefined ? AFFINITY_INIT : who[0].affinity);
+      return json({ ok: true, msg_id: rows[0].id, affinity: affNow }, 200, origin);
     }
 
     // ---- 轮询取回复 ----
@@ -185,10 +198,61 @@ export default async (request, context) => {
       const rows = await sql`SELECT id, content FROM messages
         WHERE user_id = ${userId} AND role = 'assistant' AND id > ${after}
         ORDER BY id ASC LIMIT 1`;
+
+      // 顺便把最新好感度带回给前端（前端只用于表现，如隐藏立绘，不显示数字）
+      const ua = await sql`SELECT affinity FROM users WHERE id = ${userId}`;
+      const aff = ua.length
+        ? clamp(ua[0].affinity === null || ua[0].affinity === undefined ? AFFINITY_INIT : ua[0].affinity)
+        : AFFINITY_INIT;
+
       return json({
         reply: rows[0] ? rows[0].content : null,
-        msg_id: rows[0] ? rows[0].id : null
+        msg_id: rows[0] ? rows[0].id : null,
+        affinity: aff
       }, 200, origin);
+    }
+
+    // ---- 主动搭话：好感够高才有机会说话，由前端保证一轮会话只问一次 ----
+    if (path === '/greet' && method === 'POST') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const body = await request.json().catch(() => ({}));
+      const userId = String(body.user_id || '');
+      if (!userId) return json({ error: '缺少参数' }, 400, origin);
+
+      const gu = await sql`SELECT affinity FROM users WHERE id = ${userId}`;
+      if (!gu.length) return json({ error: 'user_not_found' }, 409, origin);
+      const aff = clamp(gu[0].affinity === null || gu[0].affinity === undefined ? AFFINITY_INIT : gu[0].affinity);
+
+      // 好感 ≥60 有 35% 机会，≥80 有 60% 机会，再低就不主动开口
+      if (Math.random() >= greetProbability(aff)) {
+        return json({ reply: null, affinity: aff }, 200, origin);
+      }
+
+      const geo = (context && context.geo)
+        ? { lat: context.geo.latitude, lon: context.geo.longitude, city: context.geo.city }
+        : null;
+      const weather = await fetchWeather(geo && geo.lat, geo && geo.lon);
+
+      let line = '';
+      try {
+        line = await chatOnce({
+          model: 'deepseek-chat',
+          messages: [
+            { role: 'system', content: buildGreetPrompt({ affinity: aff, weather }) },
+            { role: 'user', content: '（推门进来，还未开口）' }
+          ],
+          maxTokens: 220
+        });
+      } catch {
+        return json({ reply: null, affinity: aff }, 200, origin);
+      }
+
+      line = String(line || '').trim();
+      if (line) {
+        await sql`INSERT INTO messages(user_id, role, content, model)
+          VALUES(${userId}, 'assistant', ${line}, 'deepseek-chat')`;
+      }
+      return json({ reply: line || null, affinity: aff }, 200, origin);
     }
 
     // ---- 管理后台登录 ----
@@ -207,7 +271,7 @@ export default async (request, context) => {
 
       if (path === '/admin/users' && method === 'GET') {
         const rows = await sql`
-          SELECT u.id, u.nickname, u.created_at,
+          SELECT u.id, u.nickname, u.created_at, u.affinity,
                  COUNT(m.id)::int AS msg_count,
                  MAX(m.created_at) AS last_active
           FROM users u LEFT JOIN messages m ON m.user_id = u.id

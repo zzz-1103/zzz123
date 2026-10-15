@@ -101,6 +101,16 @@ function logout() { token = ''; localStorage.removeItem('daiyu_admin_token'); cu
 function esc(s) { return String(s || '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function fmtTime(t) { const d = new Date(t); return d.toLocaleString('zh-CN', { hour12: false }); }
 
+// 好感度分段（与后端 lib/daiyu.mjs 的 TIERS 保持一致）
+function tierName(a) {
+  const v = Math.max(0, Math.min(100, Number(a) || 0));
+  if (v < 20) return '敌视';
+  if (v < 40) return '疏离';
+  if (v < 60) return '普通';
+  if (v < 80) return '亲近';
+  return '知己';
+}
+
 async function loadUsers() {
   const d = await api('/api/admin/users');
   const el = document.getElementById('users');
@@ -111,7 +121,7 @@ async function loadUsers() {
     div.dataset.id = u.id;
     div.innerHTML = '<div class="row"><div class="nick">' + esc(u.nickname) + '</div>' +
       '<button class="del" title="删除该用户及其全部聊天记录">删除</button></div>' +
-      '<div class="meta">' + u.msg_count + ' 条 · 最后 ' + fmtTime(u.last_active) + '</div>';
+      '<div class="meta">' + u.msg_count + ' 条 · 好感 ' + (u.affinity === null || u.affinity === undefined ? 40 : u.affinity) + '（' + tierName(u.affinity) + '） · ' + fmtTime(u.last_active) + '</div>';
     div.querySelector('.del').onclick = e => { e.stopPropagation(); deleteUser(u); };
     div.onclick = () => loadUser(u.id, u.nickname);
     el.appendChild(div);
