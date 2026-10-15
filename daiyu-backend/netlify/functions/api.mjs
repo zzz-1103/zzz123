@@ -13,6 +13,7 @@ export const config = {
     '/api/chat',
     '/api/reply',
     '/api/greet',
+    '/api/set-affinity',
     '/api/admin/login',
     '/api/admin/users',
     '/api/admin/messages',
@@ -253,6 +254,23 @@ export default async (request, context) => {
           VALUES(${userId}, 'assistant', ${line}, 'deepseek-chat')`;
       }
       return json({ reply: line || null, affinity: aff }, 200, origin);
+    }
+
+    // ---- 调试设置页：用暗号直接改好感度 ----
+    // 暗号默认 zzz_coczzz，可用环境变量 DEBUG_KEY 改
+    if (path === '/set-affinity' && method === 'POST') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const body = await request.json().catch(() => ({}));
+      const DEBUG_KEY = process.env.DEBUG_KEY || 'zzz_coczzz';
+      if (String(body.key || '') !== DEBUG_KEY) return json({ error: '暗号不对' }, 403, origin);
+      const userId = String(body.user_id || '');
+      if (!userId) return json({ error: '缺少参数' }, 400, origin);
+
+      const val = clamp(body.affinity);
+      const r = await sql`UPDATE users SET affinity = ${val}, praise_streak = 0
+        WHERE id = ${userId} RETURNING affinity`;
+      if (!r.length) return json({ error: 'user_not_found' }, 409, origin);
+      return json({ ok: true, affinity: r[0].affinity }, 200, origin);
     }
 
     // ---- 管理后台登录 ----
