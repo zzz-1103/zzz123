@@ -10,6 +10,7 @@ export const config = {
   path: [
     '/api/health',
     '/api/login',
+    '/api/register',
     '/api/chat',
     '/api/reply',
     '/api/greet',
@@ -66,6 +67,27 @@ function ensureSchema() {
       // 好感度字段（对已有表也安全，重复执行无副作用）
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS affinity INT NOT NULL DEFAULT 40`;
       await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS praise_streak INT NOT NULL DEFAULT 0`;
+      // 账号系统：密码哈希
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT`;
+
+      // 历史遗留：以前每次登录都会新建一条记录，产生重名空壳。清掉没有聊天记录的重名账号。
+      await sql`DELETE FROM users u
+        WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.user_id = u.id)
+          AND EXISTS (
+            SELECT 1 FROM users v
+            WHERE v.nickname = u.nickname AND v.id <> u.id
+              AND (
+                (SELECT COUNT(*) FROM messages m2 WHERE m2.user_id = v.id) > 0
+                OR v.created_at < u.created_at
+              )
+          )`;
+
+      // 昵称唯一（有重名时创建会失败，捕获后跳过；注册接口本身也会再查一次）
+      try {
+        await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_nickname_unique ON users(nickname)`;
+      } catch (e) {
+        console.log('[迁移] 昵称唯一索引未建立：' + ((e && e.message) || e));
+      }
     })().catch(e => { _schema = null; throw e; });
   }
   return _schema;
@@ -88,6 +110,33 @@ function json(obj, status, origin, extra) {
 }
 
 function hmac(v) { return crypto.createHmac('sha256', ADMIN_SECRET).update(v).digest('hex'); }
+
+// ---------------- 账号密码（Node 内置 scrypt，不存明文）----------------
+function hashPassword(pw) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(String(pw), salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(pw, stored) {
+  try {
+    const parts = String(stored || '').split(':');
+    if (parts.length !== 2) return false;
+    const [salt, hash] = parts;
+    if (!salt || !hash) return false;
+    const got = crypto.scryptSync(String(pw), salt, 64);
+    const want = Buffer.from(hash, 'hex');
+    if (want.length !== got.length) return false;
+    return crypto.timingSafeEqual(got, want);
+  } catch {
+    return false;
+  }
+}
+
+// 昵称规范：去掉首尾空白，长度 1~20，不允许控制字符
+function cleanNickname(v) {
+  return String(v || '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 20);
+}
 
 function issueAdminToken() {
   const exp = Date.now() + 1000 * 60 * 60 * 24 * 7; // 7 天
@@ -139,14 +188,63 @@ export default async (request, context) => {
     // ---- 健康检查 ----
     if (path === '/health') return json({ ok: true }, 200, origin);
 
-    // ---- 昵称登录 ----
+    // ---- 注册：昵称 + 密码，昵称不可重复 ----
+    if (path === '/register' && method === 'POST') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const body = await request.json().catch(() => ({}));
+      const nickname = cleanNickname(body.nickname);
+      const password = String(body.password || '');
+      if (!nickname) return json({ error: '昵称不能为空' }, 400, origin);
+      if (password.length < 4) return json({ error: '密码至少 4 位' }, 400, origin);
+
+      const exist = await sql`SELECT id FROM users WHERE nickname = ${nickname}`;
+      if (exist.length) return json({ error: '这个昵称已经有人用了，换一个吧' }, 409, origin);
+
+      try {
+        const rows = await sql`INSERT INTO users(nickname, password_hash)
+          VALUES(${nickname}, ${hashPassword(password)}) RETURNING id, nickname, affinity`;
+        return json({
+          user_id: rows[0].id,
+          nickname: rows[0].nickname,
+          affinity: clamp(rows[0].affinity === null || rows[0].affinity === undefined ? AFFINITY_INIT : rows[0].affinity)
+        }, 200, origin);
+      } catch (e) {
+        // 并发时唯一索引兜底
+        if (/duplicate|unique/i.test(String((e && e.message) || ''))) {
+          return json({ error: '这个昵称已经有人用了，换一个吧' }, 409, origin);
+        }
+        throw e;
+      }
+    }
+
+    // ---- 登录：昵称 + 密码 ----
     if (path === '/login' && method === 'POST') {
       if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
       const body = await request.json().catch(() => ({}));
-      const nickname = String(body.nickname || '').trim().slice(0, 30);
-      if (!nickname) return json({ error: '昵称不能为空' }, 400, origin);
-      const rows = await sql`INSERT INTO users(nickname) VALUES(${nickname}) RETURNING id, nickname`;
-      return json({ user_id: rows[0].id, nickname: rows[0].nickname }, 200, origin);
+      const nickname = cleanNickname(body.nickname);
+      const password = String(body.password || '');
+      if (!nickname || !password) return json({ error: '昵称和密码都要填' }, 400, origin);
+
+      const rows = await sql`SELECT id, nickname, affinity, password_hash FROM users WHERE nickname = ${nickname}`;
+      if (!rows.length) return json({ error: '没有这个账号，请先注册' }, 404, origin);
+
+      const u = rows[0];
+      // 历史遗留账号（当初没有密码）：第一次带密码登录时认领下来
+      if (!u.password_hash) {
+        await sql`UPDATE users SET password_hash = ${hashPassword(password)} WHERE id = ${u.id}`;
+        return json({
+          user_id: u.id, nickname: u.nickname,
+          affinity: clamp(u.affinity === null || u.affinity === undefined ? AFFINITY_INIT : u.affinity),
+          claimed: true
+        }, 200, origin);
+      }
+      if (!verifyPassword(password, u.password_hash)) {
+        return json({ error: '密码不对' }, 401, origin);
+      }
+      return json({
+        user_id: u.id, nickname: u.nickname,
+        affinity: clamp(u.affinity === null || u.affinity === undefined ? AFFINITY_INIT : u.affinity)
+      }, 200, origin);
     }
 
     // ---- 发消息：只存用户这句话，立刻返回 id ----

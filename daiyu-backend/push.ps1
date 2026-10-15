@@ -63,12 +63,12 @@ Set-Location $TMP
 & $GIT add -A
 
 # ---- 防坑检查：有没有文件被仓库的 .gitignore 悄悄忽略了 ----
-$staged = @(& $GIT diff --cached --name-only)
+$tracked = @(& $GIT ls-files)
 $expect = @()
 Get-ChildItem -Path $SRC -Recurse -File -Force |
-    Where-Object { $_.FullName -notmatch '\\node_modules\\' -and $_.Name -ne '.env' } |
+    Where-Object { $_.FullName -notmatch '\\node_modules\\|\\\.git\\' -and $_.Name -ne '.env' } |
     ForEach-Object { $expect += ($SUBDIR + '/' + $_.FullName.Replace("$SRC\", '').Replace('\', '/')) }
-$missed = @($expect | Where-Object { $staged -notcontains $_ })
+$missed = @($expect | Where-Object { $tracked -notcontains $_ })
 if ($missed.Count) {
     Write-Host ''
     Write-Host '⚠️  这些文件被仓库的 .gitignore 忽略了，没能提交：' -ForegroundColor Yellow
