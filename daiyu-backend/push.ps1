@@ -61,6 +61,22 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 Write-Host '[3/4] 提交并推送...'
 Set-Location $TMP
 & $GIT add -A
+
+# ---- 防坑检查：有没有文件被仓库的 .gitignore 悄悄忽略了 ----
+$staged = @(& $GIT diff --cached --name-only)
+$expect = @()
+Get-ChildItem -Path $SRC -Recurse -File -Force |
+    Where-Object { $_.FullName -notmatch '\\node_modules\\' -and $_.Name -ne '.env' } |
+    ForEach-Object { $expect += ($SUBDIR + '/' + $_.FullName.Replace("$SRC\", '').Replace('\', '/')) }
+$missed = @($expect | Where-Object { $staged -notcontains $_ })
+if ($missed.Count) {
+    Write-Host ''
+    Write-Host '⚠️  这些文件被仓库的 .gitignore 忽略了，没能提交：' -ForegroundColor Yellow
+    $missed | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
+    Write-Host '    → 请换个目录名（例如用 shared/ 而不是 lib/）' -ForegroundColor Yellow
+    Write-Host ''
+}
+
 & $GIT -c user.name='zzz-1103' -c user.email='zzz-1103@users.noreply.github.com' commit -m '更新黛玉后端'
 & $GIT push
 if ($LASTEXITCODE -ne 0) {

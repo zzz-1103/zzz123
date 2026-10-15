@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
 import {
   AFFINITY_INIT, clamp, fetchWeather, buildGreetPrompt, greetProbability, chatOnce
-} from './lib/daiyu.mjs';
+} from './shared/daiyu.mjs';
 
 export const config = {
   path: [
