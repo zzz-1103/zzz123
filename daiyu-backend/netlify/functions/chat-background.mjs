@@ -4,7 +4,7 @@ import { neon } from '@neondatabase/serverless';
 import {
   AFFINITY_INIT, clamp, computeDelta, classify, fetchWeather,
   buildSystemPrompt, chatOnce
-} from '../../lib/daiyu.mjs';
+} from './lib/daiyu.mjs';
 
 export const config = {
   path: '/bg/chat',
