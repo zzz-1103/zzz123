@@ -63,7 +63,7 @@ Set-Location $TMP
 & $GIT add -A
 
 # ---- 防坑检查：有没有文件被仓库的 .gitignore 悄悄忽略了 ----
-$tracked = @(& $GIT ls-files)
+$tracked = @(& $GIT -c core.quotepath=false ls-files)
 $expect = @()
 Get-ChildItem -Path $SRC -Recurse -File -Force |
     Where-Object { $_.FullName -notmatch '\\node_modules\\|\\\.git\\' -and $_.Name -ne '.env' } |

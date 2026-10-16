@@ -13,6 +13,7 @@ export const config = {
     '/api/register',
     '/api/chat',
     '/api/reply',
+    '/api/history',
     '/api/greet',
     '/api/set-affinity',
     '/api/admin/login',
@@ -308,6 +309,28 @@ export default async (request, context) => {
         reply: rows[0] ? rows[0].content : null,
         msg_id: rows[0] ? rows[0].id : null,
         affinity: aff
+      }, 200, origin);
+    }
+
+    // ---- 拉取历史记录（换设备 / 重装 App 后能看到以前说的话）----
+    if (path === '/history' && method === 'GET') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const userId = url.searchParams.get('user_id') || '';
+      if (!userId) return json({ error: '缺少参数' }, 400, origin);
+      const rawLimit = Number(url.searchParams.get('limit') || 60);
+      const limit = Math.min(200, Math.max(1, Number.isFinite(rawLimit) ? rawLimit : 60));
+
+      const ua = await sql`SELECT affinity FROM users WHERE id = ${userId}`;
+      if (!ua.length) return json({ error: 'user_not_found' }, 409, origin);
+
+      // 取最近 limit 条，再翻回正序（老 → 新）
+      const rows = await sql`SELECT id, role, content, created_at FROM messages
+        WHERE user_id = ${userId} ORDER BY id DESC LIMIT ${limit}`;
+      const messages = rows.slice().reverse();
+
+      return json({
+        messages,
+        affinity: clamp(ua[0].affinity === null || ua[0].affinity === undefined ? AFFINITY_INIT : ua[0].affinity)
       }, 200, origin);
     }
 
