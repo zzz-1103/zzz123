@@ -3,7 +3,9 @@
 import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
 import {
-  AFFINITY_INIT, clamp, fetchWeather, buildGreetPrompt, greetProbability, chatOnce
+  AFFINITY_INIT, clamp, fetchWeather, buildGreetPrompt, greetProbability, chatOnce,
+  normPersona, NICKNAME_PROMPT,
+  API_URL, API_KEY, resolveModel, isDeepModel
 } from './shared/daiyu.mjs';
 
 export const config = {
@@ -16,6 +18,13 @@ export const config = {
     '/api/history',
     '/api/greet',
     '/api/set-affinity',
+    '/api/memories',
+    '/api/memories/add',
+    '/api/memories/delete',
+    '/api/memories/forget',
+    '/api/persona',
+    '/api/nickname',
+    '/api/forecast',
     '/api/admin/login',
     '/api/admin/users',
     '/api/admin/messages',
@@ -89,6 +98,22 @@ function ensureSchema() {
       } catch (e) {
         console.log('[迁移] 昵称唯一索引未建立：' + ((e && e.message) || e));
       }
+
+      // ---------- 记忆与性格（每个账号一份，彼此完全隔离）----------
+      // persona: 熟悉度 / 温柔度 / 娇嗔度 / 专属称呼
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS persona JSONB`;
+      // 上次抽取记忆的位置（消息 id），每满 20 条用户消息抽一次
+      await sql`ALTER TABLE users ADD COLUMN IF NOT EXISTS mem_extract_at BIGINT NOT NULL DEFAULT 0`;
+      await sql`CREATE TABLE IF NOT EXISTS memories (
+        id BIGSERIAL PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL DEFAULT 'fact',
+        content TEXT NOT NULL,
+        weight INT NOT NULL DEFAULT 3,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_memories_user
+        ON memories(user_id, weight DESC, created_at DESC)`;
     })().catch(e => { _schema = null; throw e; });
   }
   return _schema;
@@ -187,7 +212,42 @@ export default async (request, context) => {
     const sql = db();
 
     // ---- 健康检查 ----
-    if (path === '/health') return json({ ok: true }, 200, origin);
+    //   /api/health          只看配置（不花钱、不联网）
+    //   /api/health?deep=1   真的问一句话，验证 key 通不通（花极小的钱）
+    if (path === '/health') {
+      const u = String(API_URL());
+      let host = '';
+      try { host = new URL(u).host; } catch { host = u; }
+      const key = String(API_KEY());
+      const info = {
+        ok: true,
+        api: {
+          host,
+          // 绝不回传 key 本身，只回长度和尾四位，够核对是不是换了新 key
+          keyLen: key.length,
+          keyTail: key.length >= 4 ? key.slice(-4) : '',
+          hasKey: key.length > 0
+        },
+        modelFast: resolveModel('deepseek-chat'),
+        modelDeep: resolveModel('deepseek-reasoner')
+      };
+
+      if (url.searchParams.get('deep') === '1') {
+        try {
+          const t0 = Date.now();
+          const line = await chatOnce({
+            model: 'deepseek-chat',
+            messages: [{ role: 'user', content: '只回两个字：通了' }],
+            maxTokens: 8
+          });
+          info.probe = { ok: true, ms: Date.now() - t0, reply: String(line).slice(0, 20) };
+        } catch (e) {
+          info.probe = { ok: false, error: String((e && e.message) || e).slice(0, 200) };
+          info.ok = false;
+        }
+      }
+      return json(info, 200, origin);
+    }
 
     // ---- 注册：昵称 + 密码，昵称不可重复 ----
     if (path === '/register' && method === 'POST') {
@@ -273,10 +333,22 @@ export default async (request, context) => {
         ? { lat: context.geo.latitude, lon: context.geo.longitude, city: context.geo.city }
         : null;
 
+      // 用户在 App 里同意之后，前端才会带上这些；不带就完全当没有
+      // 只有：电量 / 是否充电 / 是否戴耳机 / 网络类型 / 当前时刻
+      const device = (body.device && typeof body.device === 'object')
+        ? {
+            battery: Number(body.device.battery),
+            charging: !!body.device.charging,
+            headset: !!body.device.headset,
+            network: String(body.device.network || '').slice(0, 16),
+            hour: Number(body.device.hour)
+          }
+        : null;
+
       const bgPromise = fetch(`${url.origin}/bg/chat`, {
         method: 'POST',
         headers: bgHeaders,
-        body: JSON.stringify({ user_id: userId, model, geo })
+        body: JSON.stringify({ user_id: userId, model, geo, device })
       }).catch(() => {});
 
       if (context && typeof context.waitUntil === 'function') {
@@ -334,6 +406,155 @@ export default async (request, context) => {
       }, 200, origin);
     }
 
+    // ---- 记忆：查看 / 新增 / 删除 / 全部忘掉 ----
+    // 记忆完全按账号隔离，永远带着 user_id 查
+    if (path === '/memories' && method === 'GET') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const userId = url.searchParams.get('user_id') || '';
+      if (!userId) return json({ error: '缺少参数' }, 400, origin);
+
+      const u = await sql`SELECT persona FROM users WHERE id = ${userId}`;
+      if (!u.length) return json({ error: 'user_not_found' }, 409, origin);
+
+      const rows = await sql`SELECT id, kind, content, weight, created_at FROM memories
+        WHERE user_id = ${userId} ORDER BY weight DESC, created_at DESC LIMIT 200`;
+      const cnt = await sql`SELECT COUNT(*)::int AS n FROM messages
+        WHERE user_id = ${userId} AND role = 'user'`;
+
+      return json({
+        memories: rows,
+        persona: normPersona(u[0].persona),
+        userMsgs: cnt[0].n
+      }, 200, origin);
+    }
+
+    if (path === '/memories/add' && method === 'POST') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const body = await request.json().catch(() => ({}));
+      const userId = String(body.user_id || '');
+      const content = String(body.content || '').trim().replace(/\s+/g, ' ').slice(0, 60);
+      if (!userId || !content) return json({ error: '缺少参数' }, 400, origin);
+
+      const u = await sql`SELECT id FROM users WHERE id = ${userId}`;
+      if (!u.length) return json({ error: 'user_not_found' }, 409, origin);
+
+      const kind = ['fact', 'habit', 'moment'].includes(body.kind) ? body.kind : 'fact';
+      const w = Math.max(1, Math.min(5, Number(body.weight) || 4));
+      const rows = await sql`INSERT INTO memories(user_id, kind, content, weight)
+        VALUES(${userId}, ${kind}, ${content}, ${w})
+        RETURNING id, kind, content, weight, created_at`;
+      return json({ ok: true, memory: rows[0] }, 200, origin);
+    }
+
+    if (path === '/memories/delete' && method === 'POST') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const body = await request.json().catch(() => ({}));
+      const userId = String(body.user_id || '');
+      const id = Number(body.id);
+      if (!userId || !Number.isFinite(id)) return json({ error: '缺少参数' }, 400, origin);
+
+      // 同时带 user_id 条件，防止删到别人的
+      const rows = await sql`DELETE FROM memories WHERE id = ${id} AND user_id = ${userId} RETURNING id`;
+      return json({ ok: true, deleted: rows.length }, 200, origin);
+    }
+
+    if (path === '/memories/forget' && method === 'POST') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const body = await request.json().catch(() => ({}));
+      const userId = String(body.user_id || '');
+      if (!userId) return json({ error: '缺少参数' }, 400, origin);
+
+      // 「全部收回」：记忆清空 + 性格重置 + 抽取进度归零
+      const rows = await sql`DELETE FROM memories WHERE user_id = ${userId} RETURNING id`;
+      await sql`UPDATE users SET persona = ${JSON.stringify({
+        familiarity: 0, warmth: 50, playfulness: 50, nickname: '', nicknameAsked: false
+      })}::jsonb, mem_extract_at = 0 WHERE id = ${userId}`;
+      return json({ ok: true, forgotten: rows.length }, 200, origin);
+    }
+
+    // ---- 专属称呼：改（用户自己改）----
+    if (path === '/persona' && method === 'POST') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const body = await request.json().catch(() => ({}));
+      const userId = String(body.user_id || '');
+      if (!userId) return json({ error: '缺少参数' }, 400, origin);
+
+      const u = await sql`SELECT persona FROM users WHERE id = ${userId}`;
+      if (!u.length) return json({ error: 'user_not_found' }, 409, origin);
+      const p = normPersona(u[0].persona);
+      if (typeof body.nickname === 'string') p.nickname = body.nickname.trim().slice(0, 12);
+      if (body.nicknameAsked === true) p.nicknameAsked = true;
+      // 就寝/起床时间：传 wakeHour = -1 表示"她不知道"
+      if (body.wakeHour !== undefined) {
+        const h = Number(body.wakeHour);
+        p.wakeHour = (Number.isFinite(h) && h >= 0 && h <= 23) ? Math.round(h) : -1;
+        const m = Number(body.wakeMinute);
+        p.wakeMinute = (Number.isFinite(m) && m >= 0 && m <= 59) ? Math.round(m) : 0;
+      }
+
+      await sql`UPDATE users SET persona = ${JSON.stringify(p)}::jsonb WHERE id = ${userId}`;
+      return json({ ok: true, persona: p }, 200, origin);
+    }
+
+    // ---- 专属称呼：让她自己起一个 ----
+    if (path === '/nickname' && method === 'POST') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const body = await request.json().catch(() => ({}));
+      const userId = String(body.user_id || '');
+      if (!userId) return json({ error: '缺少参数' }, 400, origin);
+
+      const u = await sql`SELECT persona FROM users WHERE id = ${userId}`;
+      if (!u.length) return json({ error: 'user_not_found' }, 409, origin);
+      const p = normPersona(u[0].persona);
+
+      // 已经起过就直接返回，不重复花钱
+      if (p.nickname) return json({ ok: true, nickname: p.nickname, persona: p }, 200, origin);
+
+      const mems = await sql`SELECT content FROM memories
+        WHERE user_id = ${userId} ORDER BY weight DESC, created_at DESC LIMIT 20`;
+      const facts = mems.map(m => '· ' + m.content).join('\n') || '（还没有攒下什么）';
+
+      let nick = '';
+      try {
+        nick = await chatOnce({
+          model: 'deepseek-chat',
+          messages: [
+            { role: 'system', content: NICKNAME_PROMPT },
+            { role: 'user', content: '【你们之间发生过的事】\n' + facts }
+          ],
+          maxTokens: 20
+        });
+      } catch (e) {
+        return json({ error: '起不出来' }, 500, origin);
+      }
+      nick = String(nick || '').replace(/["'"「」【】。，、！？\s]/g, '').slice(0, 6);
+      if (!nick) return json({ error: '起不出来' }, 500, origin);
+
+      p.nickname = nick;
+      p.nicknameAsked = true;
+      await sql`UPDATE users SET persona = ${JSON.stringify(p)}::jsonb WHERE id = ${userId}`;
+      return json({ ok: true, nickname: nick, persona: p }, 200, origin);
+    }
+
+    // ---- 天气预报（给前端展示"往后几天"，也用来提醒添衣）----
+    if (path === '/forecast' && method === 'GET') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const lat = Number(url.searchParams.get('lat'));
+      const lon = Number(url.searchParams.get('lon'));
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        return json({ error: '缺少坐标' }, 400, origin);
+      }
+      const w = await fetchWeather(lat, lon);
+      if (!w) return json({ ok: false, error: '取不到天气' }, 200, origin);
+      return json({
+        ok: true,
+        now: { desc: w.desc, temp: w.temp },
+        days: w.days || [],
+        forecast: w.forecast || '',
+        advice: w.advice || ''
+      }, 200, origin);
+    }
+
     // ---- 主动搭话：好感够高才有机会说话，由前端保证一轮会话只问一次 ----
     if (path === '/greet' && method === 'POST') {
       if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
@@ -355,12 +576,22 @@ export default async (request, context) => {
         : null;
       const weather = await fetchWeather(geo && geo.lat, geo && geo.lon);
 
+      const devG = (body.device && typeof body.device === 'object')
+        ? {
+            battery: Number(body.device.battery),
+            charging: !!body.device.charging,
+            headset: !!body.device.headset,
+            network: String(body.device.network || '').slice(0, 16),
+            hour: Number(body.device.hour)
+          }
+        : null;
+
       let line = '';
       try {
         line = await chatOnce({
           model: 'deepseek-chat',
           messages: [
-            { role: 'system', content: buildGreetPrompt({ affinity: aff, weather }) },
+            { role: 'system', content: buildGreetPrompt({ affinity: aff, weather, device: devG }) },
             { role: 'user', content: '（推门进来，还未开口）' }
           ],
           maxTokens: 220
@@ -412,7 +643,8 @@ export default async (request, context) => {
         const rows = await sql`
           SELECT u.id, u.nickname, u.created_at, u.affinity,
                  COUNT(m.id)::int AS msg_count,
-                 MAX(m.created_at) AS last_active
+                 MAX(m.created_at) AS last_active,
+                 (SELECT COUNT(*)::int FROM memories mm WHERE mm.user_id = u.id) AS mem_count
           FROM users u LEFT JOIN messages m ON m.user_id = u.id
           GROUP BY u.id
           ORDER BY last_active DESC NULLS LAST`;
