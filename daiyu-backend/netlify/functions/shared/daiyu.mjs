@@ -807,6 +807,12 @@ export async function describeImage(p) {
         (d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content) || ''
       ).replace(/\s+/g, ' ').trim().slice(0, 600);
       if (!desc) { tries.push({ model, error: '没有内容' }); continue; }
+      // 有的模型会"礼貌地收下图片但不看"，回一句"我看不到" —— 这不算成功，
+      // 必须当成失败换下一个型号，否则会把"我看不到这张图"当成图片描述存进去。
+      if (/无法看到|看不到这|不支持的图片|不能查看|无法识别这张|请重新上传|没有可读取|看不到图/.test(desc)) {
+        tries.push({ model, error: '这个型号不接受图片', reply: desc.slice(0, 80) });
+        continue;
+      }
       return { ok: true, desc, model, tries };
     } catch (e) {
       tries.push({ model, error: String((e && e.message) || e).slice(0, 160) });

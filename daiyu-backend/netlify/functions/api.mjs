@@ -632,7 +632,14 @@ export default async (request, context) => {
       }
       const got = await describeImage({ dataUrl, note: body.note });
       if (!got.ok) {
-        return json({ ok: false, error: got.error, tries: got.tries }, 200, origin);
+        return json({
+          ok: false,
+          error: got.error,
+          tries: got.tries,
+          // 给前端的明确提示：需要单独配一家视觉模型
+          needVision: true,
+          hint: '当前模型看不了图。请在 Netlify 环境变量里加 VISION_API_URL / VISION_API_KEY / VISION_MODEL（推荐通义千问 qwen-vl-plus）。'
+        }, 200, origin);
       }
       return json({ ok: true, desc: got.desc, model: got.model }, 200, origin);
     }
