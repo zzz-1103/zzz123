@@ -26,6 +26,7 @@ export const config = {
     '/api/nickname',
     '/api/forecast',
     '/api/nag',
+    '/api/version',
     '/api/admin/login',
     '/api/admin/users',
     '/api/admin/messages',
@@ -592,6 +593,19 @@ export default async (request, context) => {
       if (!got) return json({ ok: false, error: '写不出来' }, 200, origin);
 
       return json({ ok: true, days, morning: got.morning, night: got.night }, 200, origin);
+    }
+
+    // ---- 版本检查：App 启动时问一次，比自己新就弹更新窗 ----
+    // 版本号放环境变量里，以后发新包只要改环境变量，不用改代码。
+    if (path === '/version' && method === 'GET') {
+      const ver = String(process.env.APK_VERSION || '1.2').trim();
+      const code = Number(process.env.APK_VERSION_CODE) || 3;
+      const url = String(process.env.APK_URL || 'https://lindaiyu.netlify.app/daiyu.apk').trim();
+      const notes = String(process.env.APK_NOTES || '').trim().slice(0, 200);
+      return json({
+        ok: true,
+        apk: { version: ver, versionCode: code, url, notes }
+      }, 200, origin);
     }
 
     // ---- 主动搭话：好感够高才有机会说话，由前端保证一轮会话只问一次 ----
