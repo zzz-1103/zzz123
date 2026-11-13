@@ -39,12 +39,15 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || 'https://lindaiyu.netlify
   .split(',').map(s => s.trim()).filter(Boolean);
 
 // 允许的跨域来源：配置里列出的 + 任意 netlify.app 站点（前端站改名/预览部署也不怕）
+// 另外必须放行 Capacitor 的内置来源 —— App 用本地备份页面时来源是 https://localhost
 function originAllowed(origin) {
   if (!origin) return false;
   if (ALLOWED_ORIGINS.includes(origin)) return true;
   if (/^https:\/\/[a-z0-9-]+\.netlify\.app$/.test(origin)) return true;
-  if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return true;
-  if (/^http:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) return true;
+  // Capacitor / Android WebView 的本地来源
+  if (/^(https?|capacitor|ionic):\/\/localhost(:\d+)?$/.test(origin)) return true;
+  if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return true;
+  if (/^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) return true;
   return false;
 }
 
