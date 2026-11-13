@@ -221,6 +221,7 @@ export default async (request, context) => {
       const key = String(API_KEY());
       const info = {
         ok: true,
+        build: 'v2-2026-11-13',   // 部署探测标记：变了说明新代码真的上线了
         api: {
           host,
           // 绝不回传 key 本身，只回长度和尾四位，够核对是不是换了新 key
