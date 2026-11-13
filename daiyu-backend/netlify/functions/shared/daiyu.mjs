@@ -743,9 +743,11 @@ export function visionCandidates() {
   return String(process.env.VISION_MODEL || '').trim()
     ? String(process.env.VISION_MODEL).split(',').map(s => s.trim()).filter(Boolean)
     : [
+        // 线上 /v1/models 实际返回的是这两个，先把它们排在前面试
+        'deepseek-v4-pro',
+        'deepseek-flash',
         'deepseek-v4-flash-vision-exp',
         'deepseek-vision',
-        'deepseek-vl2',
         'deepseek-chat'
       ];
 }
