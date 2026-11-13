@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
 import {
   AFFINITY_INIT, clamp, fetchWeather, buildGreetPrompt, greetProbability, chatOnce,
-  normPersona, NICKNAME_PROMPT,
+  normPersona, NICKNAME_PROMPT, nagLines,
   API_URL, API_KEY, resolveModel, isDeepModel
 } from './shared/daiyu.mjs';
 
@@ -25,6 +25,7 @@ export const config = {
     '/api/persona',
     '/api/nickname',
     '/api/forecast',
+    '/api/nag',
     '/api/admin/login',
     '/api/admin/users',
     '/api/admin/messages',
@@ -557,6 +558,40 @@ export default async (request, context) => {
         forecast: w.forecast || '',
         advice: w.advice || ''
       }, 200, origin);
+    }
+
+    // ---- 她主动找你：提前写好未来几天的晨/夜话，交给手机自己到点弹 ----
+    // 手机端拿到这些句子后，用系统定时通知排进去；
+    // App 关掉也能弹（由系统负责），不需要 App 在后台跑。
+    if (path === '/nag' && method === 'POST') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const body = await request.json().catch(() => ({}));
+      const userId = String(body.user_id || '');
+      if (!userId) return json({ error: '缺少参数' }, 400, origin);
+      const days = Math.max(1, Math.min(7, Number(body.days) || 3));
+
+      const u = await sql`SELECT affinity, persona FROM users WHERE id = ${userId}`;
+      if (!u.length) return json({ error: 'user_not_found' }, 409, origin);
+      const raw = u[0].affinity;
+      const affinity = clamp(raw === null || raw === undefined ? AFFINITY_INIT : raw);
+      const persona = normPersona(u[0].persona);
+
+      const mems = await sql`SELECT content FROM memories
+        WHERE user_id = ${userId} ORDER BY weight DESC, created_at DESC LIMIT 12`;
+
+      let weather = null;
+      try {
+        const geo = (context && context.geo) ? context.geo : null;
+        const lat = Number(body.lat) || (geo && geo.latitude);
+        const lon = Number(body.lon) || (geo && geo.longitude);
+        if (lat && lon) weather = await fetchWeather(lat, lon);
+      } catch { /* 拿不到天气也能写 */ }
+
+      const got = await nagLines({ affinity, weather, memories: mems, persona, days },
+        process.env.DEEPSEEK_API_KEY || '');
+      if (!got) return json({ ok: false, error: '写不出来' }, 200, origin);
+
+      return json({ ok: true, days, morning: got.morning, night: got.night }, 200, origin);
     }
 
     // ---- 主动搭话：好感够高才有机会说话，由前端保证一轮会话只问一次 ----

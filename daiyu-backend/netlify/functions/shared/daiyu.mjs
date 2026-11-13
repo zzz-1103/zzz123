@@ -663,3 +663,74 @@ export const NICKNAME_PROMPT = `你就是林黛玉。你和眼前这人已经聊
 只输出这个称呼本身，不要引号、不要解释、不要标点。
 例如：木头`;
 
+// ---------------- 主动通知（她提前写好话，手机到点自己弹）----------------
+export const NAG_PROMPT = `你就是林黛玉。现在你要主动给这个人发一条手机通知——
+他这会儿不在你面前，看不见你的脸，只看得见一行字。
+
+【写什么】
+- morning（早晨）：催他起身、问早饭吃了没有、提一句天色冷暖
+- night（夜里）：催他睡、别熬夜、说明早还要起
+
+【要求】
+- 每条 **一句话，20~35 字**，能独立看懂（不能依赖上下文）
+- 有具体的东西：天色的冷暖、时辰的早晚、他的习惯（熬夜、不吃早饭）
+- 语气按交情来：交情浅就淡一点，交情深就可以念叨、可以使小性子
+- 严禁「通知」「提醒」「系统」这类词；严禁表情符号、颜文字
+- 不要每句都一个模子，要有变化
+
+【输出】只输出合法 JSON，不要多余文字：
+{"morning":["...","...","..."],"night":["...","...","..."]}`;
+
+/** 让黛玉提前写好未来几天的晨/夜两句话 */
+export async function nagLines(params, apiKey) {
+  const { affinity, weather, memories, persona, days } = params || {};
+  try {
+    const t = tierOf(affinity);
+    const blocks = [
+      NAG_PROMPT,
+      `【你此刻对眼前这人的心情：${t.name}】\n${t.mood}`
+    ];
+    const p = describePersona(persona);
+    if (p) blocks.push(`【你和他之间已经攒下的东西】\n${p}`);
+    const mem = (memories || []).slice(0, 12).map(m => '· ' + m.content).join('\n');
+    if (mem) blocks.push(`【你记得他的事】\n${mem}`);
+    if (weather && weather.forecast) blocks.push(`【往后几日】\n${weather.forecast}`);
+    blocks.push(`【要写几天】早晨 ${days} 条，夜里 ${days} 条。`);
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 40000);
+    let r;
+    try {
+      r = await fetch(API_URL(), {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + (apiKey || API_KEY()), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: resolveModel('deepseek-chat'),
+          messages: [{ role: 'system', content: blocks.join('\n\n') }],
+          max_tokens: 700,
+          temperature: 0.9,
+          response_format: { type: 'json_object' }
+        }),
+        signal: ctrl.signal
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!r.ok) return null;
+    const d = await r.json();
+    const raw = (d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content) || '{}';
+    let j;
+    try { j = JSON.parse(raw); } catch { return null; }
+    const clean = (arr) => (Array.isArray(arr) ? arr : [])
+      .map(s => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 60))
+      .filter(s => s.length >= 6)
+      .slice(0, days);
+    const morning = clean(j.morning);
+    const night = clean(j.night);
+    if (!morning.length && !night.length) return null;
+    return { morning, night };
+  } catch {
+    return null;
+  }
+}
+
