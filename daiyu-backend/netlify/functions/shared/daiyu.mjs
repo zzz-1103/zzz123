@@ -681,8 +681,7 @@ export const NAG_PROMPT = `你就是林黛玉。现在你要主动给这个人�
 【输出】只输出合法 JSON，不要多余文字：
 {"morning":["...","...","..."],"night":["...","...","..."]}`;
 
-/** 让黛玉提前写好未来几天的晨/夜两句话 */
-export async function nagLines(params, apiKey) {
+/** 让黛玉提前写好未来几天的晨/夜两句话 */export async function nagLines(params, apiKey) {
   const { affinity, weather, memories, persona, days } = params || {};
   try {
     const t = tierOf(affinity);
@@ -733,4 +732,87 @@ export async function nagLines(params, apiKey) {
     return null;
   }
 }
+
+// ---------------- 看图（视觉模型）----------------
+// 模型名可配：VISION_MODEL 里用逗号分隔多个候选，按顺序试，哪个通用哪个。
+// 为什么要"试"：DeepSeek 的视觉模型还在实验期，型号名可能变；
+// 写成候选列表，型号换了只改环境变量，不用改代码。
+export const VISION_URL = () => process.env.VISION_API_URL || API_URL();
+export const VISION_KEY = () => process.env.VISION_API_KEY || API_KEY();
+export function visionCandidates() {
+  return String(process.env.VISION_MODEL || '').trim()
+    ? String(process.env.VISION_MODEL).split(',').map(s => s.trim()).filter(Boolean)
+    : [
+        'deepseek-v4-flash-vision-exp',
+        'deepseek-vision',
+        'deepseek-vl2',
+        'deepseek-chat'
+      ];
+}
+
+const VISION_PROMPT = `仔细看这张图，用中文写一段客观描述（60～150 字）：
+
+1. 图里有什么、是谁（几个人、男女老少）、在做什么
+2. 如果是文字类（截图、聊天记录、书本、路牌），把关键文字原样抄出来
+3. 如果是风景或食物或物件，说清颜色、数量、大概的场景氛围
+
+只描述你确实看到的东西，不要臆测，不要评论，不要用"我觉得"。`;
+
+/**
+ * 让视觉模型客观描述一张图。
+ * @param {{dataUrl:string, note?:string}} p
+ * @returns {Promise<{ok:boolean, desc?:string, model?:string, error?:string, tries?:Array}>}
+ */
+export async function describeImage(p) {
+  const dataUrl = String((p && p.dataUrl) || '');
+  if (!dataUrl.startsWith('data:image/')) return { ok: false, error: '图片格式不对' };
+
+  const userContent = [
+    { type: 'text', text: (p && p.note ? `他想让我看的是：${String(p.note).slice(0, 120)}\n\n` : '') + '请描述这张图。' },
+    { type: 'image_url', image_url: { url: dataUrl } }
+  ];
+
+  const tries = [];
+  for (const model of visionCandidates()) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 45000);
+    try {
+      const r = await fetch(VISION_URL(), {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + VISION_KEY(),
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: VISION_PROMPT },
+            { role: 'user', content: userContent }
+          ],
+          max_tokens: 500,
+          temperature: 0.3
+        }),
+        signal: ctrl.signal
+      });
+      const raw = await r.text();
+      if (!r.ok) {
+        tries.push({ model, http: r.status, error: raw.slice(0, 160) });
+        continue;                       // 这个型号不行，换下一个
+      }
+      let d;
+      try { d = JSON.parse(raw); } catch { tries.push({ model, error: '返回不是 JSON' }); continue; }
+      const desc = String(
+        (d && d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content) || ''
+      ).replace(/\s+/g, ' ').trim().slice(0, 600);
+      if (!desc) { tries.push({ model, error: '没有内容' }); continue; }
+      return { ok: true, desc, model, tries };
+    } catch (e) {
+      tries.push({ model, error: String((e && e.message) || e).slice(0, 160) });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return { ok: false, error: '所有视觉模型都试过了，都不行', tries };
+}
+
 

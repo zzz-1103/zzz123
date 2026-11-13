@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
 import {
   AFFINITY_INIT, clamp, fetchWeather, buildGreetPrompt, greetProbability, chatOnce,
-  normPersona, NICKNAME_PROMPT, nagLines,
+  normPersona, NICKNAME_PROMPT, nagLines, describeImage, visionCandidates,
   API_URL, API_KEY, resolveModel, isDeepModel
 } from './shared/daiyu.mjs';
 
@@ -27,6 +27,8 @@ export const config = {
     '/api/forecast',
     '/api/nag',
     '/api/version',
+    '/api/vision',
+    '/api/vision/models',
     '/api/admin/login',
     '/api/admin/users',
     '/api/admin/messages',
@@ -593,6 +595,46 @@ export default async (request, context) => {
       if (!got) return json({ ok: false, error: '写不出来' }, 200, origin);
 
       return json({ ok: true, days, morning: got.morning, night: got.night }, 200, origin);
+    }
+
+    // ---- 看图：把图片交给视觉模型，换回一段客观描述 ----
+    //   前端拿到 desc 之后，再把「[图片] + desc」当普通消息发 /api/chat，
+    //   这样好感度、记忆抽取、主动搭话全都不用改。图片本身不落库。
+    if (path === '/vision/models' && method === 'GET') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const key = String(API_KEY());
+      let list = null, err = null;
+      try {
+        const r = await fetch(API_URL().replace(/\/chat\/completions.*$/, '/models'), {
+          headers: { 'Authorization': 'Bearer ' + key }
+        });
+        if (r.ok) {
+          const d = await r.json();
+          list = (d && d.data ? d.data : []).map(x => x && x.id).filter(Boolean);
+        } else { err = 'HTTP ' + r.status + ' ' + (await r.text()).slice(0, 200); }
+      } catch (e) { err = String((e && e.message) || e); }
+      return json({
+        ok: true,
+        willTry: visionCandidates(),
+        providerModels: list,
+        providerError: err
+      }, 200, origin);
+    }
+
+    if (path === '/vision' && method === 'POST') {
+      if (appKeyBad()) return json({ error: 'unauthorized' }, 401, origin);
+      const body = await request.json().catch(() => null);
+      if (!body || !body.image) return json({ error: '缺少图片' }, 400, origin);
+      const dataUrl = String(body.image);
+      // 体积上限：Netlify 的函数请求体上限是 6 MB，留足余量
+      if (dataUrl.length > 5 * 1024 * 1024) {
+        return json({ ok: false, error: '图片太大了（压缩后仍超过 5 MB）' }, 413, origin);
+      }
+      const got = await describeImage({ dataUrl, note: body.note });
+      if (!got.ok) {
+        return json({ ok: false, error: got.error, tries: got.tries }, 200, origin);
+      }
+      return json({ ok: true, desc: got.desc, model: got.model }, 200, origin);
     }
 
     // ---- 版本检查：App 启动时问一次，比自己新就弹更新窗 ----
