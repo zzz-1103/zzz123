@@ -647,8 +647,8 @@ export default async (request, context) => {
     // ---- 版本检查：App 启动时问一次，比自己新就弹更新窗 ----
     // 版本号放环境变量里，以后发新包只要改环境变量，不用改代码。
     if (path === '/version' && method === 'GET') {
-      const ver = String(process.env.APK_VERSION || '1.2').trim();
-      const code = Number(process.env.APK_VERSION_CODE) || 3;
+      const ver = String(process.env.APK_VERSION || '1.3').trim();
+      const code = Number(process.env.APK_VERSION_CODE) || 4;
       const url = String(process.env.APK_URL || 'https://lindaiyu.netlify.app/daiyu.apk').trim();
       const notes = String(process.env.APK_NOTES || '').trim().slice(0, 200);
       return json({
